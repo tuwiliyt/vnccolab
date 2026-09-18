@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+USER_NAME="$(whoami)"
+HOME_DIR="$HOME"
+VNC_PASS="${1:-vncpass123}"
+
 echo "=== [1/5] Memeriksa & Menginstal Paket Desktop & VNC ==="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -31,65 +35,61 @@ if ! command -v google-chrome &>/dev/null; then
     rm -f /tmp/chrome.deb
 fi
 
-echo "=== [3/5] Mengonfigurasi Pengguna & Desktop XFCE ==="
-if ! id -u ubuntu &>/dev/null; then
-    useradd -m -s /bin/bash -G sudo ubuntu
+# Izinkan Chrome berjalan sebagai root (--no-sandbox)
+if [ -f /usr/share/applications/google-chrome.desktop ]; then
+    sed -i 's|/usr/bin/google-chrome-stable|/usr/bin/google-chrome-stable --no-sandbox|g' /usr/share/applications/google-chrome.desktop
 fi
-echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu
-chmod 0440 /etc/sudoers.d/ubuntu
 
-# noVNC default index
+echo "=== [3/5] Mengonfigurasi VNC & Tampilan Desktop ==="
+mkdir -p "$HOME_DIR/.vnc"
+echo "$VNC_PASS" | vncpasswd -f > "$HOME_DIR/.vnc/passwd"
+chmod 600 "$HOME_DIR/.vnc/passwd"
+
+cat << 'XSTARTUP' > "$HOME_DIR/.vnc/xstartup"
+#!/bin/bash
+unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
+export XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP=XFCE
+exec dbus-launch --exit-with-session startxfce4
+XSTARTUP
+chmod +x "$HOME_DIR/.vnc/xstartup"
+
+# Shortcut Desktop
+mkdir -p "$HOME_DIR/Desktop"
+cp /usr/share/applications/google-chrome.desktop "$HOME_DIR/Desktop/" 2>/dev/null || true
+cp /usr/share/applications/xfce4-terminal.desktop "$HOME_DIR/Desktop/" 2>/dev/null || true
+chmod +x "$HOME_DIR/Desktop/"*.desktop 2>/dev/null || true
+
+# Shortcut Google Drive & Workspace jika ada di Colab
+if [ -d "/content/drive/MyDrive" ]; then
+    ln -sf "/content/drive/MyDrive" "$HOME_DIR/Desktop/Google Drive"
+elif [ -d "/content/drive" ]; then
+    ln -sf "/content/drive" "$HOME_DIR/Desktop/Google Drive"
+fi
+
+if [ -d "/content" ]; then
+    ln -sf "/content" "$HOME_DIR/Desktop/Colab Workspace"
+fi
+
+# noVNC index
 ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
-# VNC Password
-VNC_PASS="${1:-vncpass123}"
-mkdir -p /home/ubuntu/.vnc
-echo "$VNC_PASS" | vncpasswd -f > /home/ubuntu/.vnc/passwd
-chmod 600 /home/ubuntu/.vnc/passwd
-
-# Xstartup
-cat << 'EOF' > /home/ubuntu/.vnc/xstartup
-#!/bin/bash
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-export XDG_SESSION_TYPE=x11
-export XDG_CURRENT_DESKTOP=XFCE
-exec dbus-launch --exit-with-session startxfce4
-EOF
-chmod +x /home/ubuntu/.vnc/xstartup
-
-# Desktop shortcuts
-mkdir -p /home/ubuntu/Desktop
-cp /usr/share/applications/google-chrome.desktop /home/ubuntu/Desktop/ 2>/dev/null || true
-cp /usr/share/applications/xfce4-terminal.desktop /home/ubuntu/Desktop/ 2>/dev/null || true
-chmod +x /home/ubuntu/Desktop/*.desktop 2>/dev/null || true
-chown -R ubuntu:ubuntu /home/ubuntu
-
-echo "=== [4/5] Memulai Layanan VNC, WebSockify, & Cloudflare Tunnel ==="
-# Bersihkan proses lama jika ada
+echo "=== [4/5] Memulai Layanan Desktop ==="
 pkill -f "cloudflared.*tunnel" 2>/dev/null || true
 pkill -f "websockify.*6080" 2>/dev/null || true
-su - ubuntu -c "vncserver -kill :1 2>/dev/null || true"
+vncserver -kill :1 2>/dev/null || true
 sleep 1
 
-# Jalankan VNC
-su - ubuntu -c "vncserver :1 -geometry 1280x720 -depth 24"
-
-# Jalankan WebSockify (noVNC bridge)
+vncserver :1 -geometry 1280x720 -depth 24
 websockify --web=/usr/share/novnc 6080 localhost:5901 -D
 
-# Jalankan Cloudflare Tunnel
 mkdir -p /var/log/remote-desktop
 nohup cloudflared tunnel --url http://127.0.0.1:6080 > /var/log/remote-desktop/cloudflared.log 2>&1 &
 
-echo "=== [5/5] Mendapatkan Tautan Remote Desktop ==="
-echo "Menghubungkan ke Cloudflare Edge Network..."
+echo "=== [5/5] Menghubungkan ke Cloudflare ==="
 URL=""
 for i in {1..35}; do
     URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com' /var/log/remote-desktop/cloudflared.log 2>/dev/null | tail -n 1 || true)
-    if [ -n "$URL" ]; then
-        break
-    fi
+    [ -n "$URL" ] && break
     sleep 1
 done
 
@@ -97,11 +97,16 @@ echo ""
 echo "=================================================================="
 echo "          🎉 REMOTE DESKTOP BERHASIL DIAKTIFKAN! 🎉"
 echo "=================================================================="
-if [ -n "$URL" ]; then
-    echo " Link Akses Browser : $URL/vnc.html?autoconnect=true&resize=scale"
-else
-    echo " Catatan: Tunnel sedang dibuat, cek link via: cat /var/log/remote-desktop/cloudflared.log"
-fi
+[ -n "$URL" ] && echo " Link Akses Browser : $URL/vnc.html?autoconnect=true&resize=scale"
 echo " Password VNC       : $VNC_PASS"
-echo " User OS            : ubuntu"
+echo " User               : $USER_NAME"
+if command -v nvidia-smi &>/dev/null; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "Terdeteksi")
+    echo " Akselerasi GPU     : Aktif ($GPU_NAME)"
+else
+    echo " Akselerasi GPU     : Mode CPU (Standar)"
+fi
+if [ -d "/content/drive/MyDrive" ]; then
+    echo " Google Drive       : Terhubung (/content/drive/MyDrive)"
+fi
 echo "=================================================================="
