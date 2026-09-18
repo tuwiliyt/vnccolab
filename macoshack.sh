@@ -1,68 +1,120 @@
 #!/bin/bash
 set -e
 
+USER_NAME="$(whoami)"
+HOME_DIR="$HOME"
+VNC_PASS="${1:-vncpass123}"
+
 echo "=================================================================="
-echo "      🚀 MENYIAPKAN CONTAINER TUWILIYT/MACOSHACK DI COLAB"
+echo "          🍎 MEMULAI SETUP MACOS HACK (COLAB EDITION) 🍎"
 echo "=================================================================="
 
+# 1. Update & Pasang Paket Esensial
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y --no-install-recommends curl wget net-tools psmisc python3-pip
+apt-get install -y --no-install-recommends \
+    xfce4 \
+    xfce4-terminal \
+    tigervnc-standalone-server \
+    tigervnc-tools \
+    novnc \
+    websockify \
+    dbus-x11 \
+    x11-xserver-utils \
+    curl \
+    wget \
+    net-tools \
+    psmisc \
+    plank \
+    git
 
-# 1. Install Cloudflared jika belum ada
+# 2. Pasang Cloudflared Tunnel
 if ! command -v cloudflared &>/dev/null; then
-    echo "Menginstal Cloudflared Tunnel..."
+    echo "Menginstal Cloudflared..."
     curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cf.deb
     dpkg -i /tmp/cf.deb && rm -f /tmp/cf.deb
 fi
 
-# 2. Siapkan Mount Volume (Google Drive & Workspace)
-VOLUME_FLAGS=""
+# 3. Pasang Google Chrome
+if ! command -v google-chrome &>/dev/null; then
+    echo "Menginstal Google Chrome..."
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
+    apt-get install -y /tmp/chrome.deb
+    rm -f /tmp/chrome.deb
+fi
+
+if [ -f /usr/share/applications/google-chrome.desktop ]; then
+    sed -i 's|/usr/bin/google-chrome-stable|/usr/bin/google-chrome-stable --no-sandbox|g' /usr/share/applications/google-chrome.desktop
+fi
+
+# 4. Pasang Tema macOS WhiteSur & Icon
+echo "Mengonfigurasi tema macOS (WhiteSur & Plank Dock)..."
+if [ ! -d "/usr/share/themes/WhiteSur-Dark" ]; then
+    rm -rf /tmp/whitesur-theme
+    git clone --depth=1 https://github.com/vinceliuice/WhiteSur-gtk-theme.git /tmp/whitesur-theme
+    /tmp/whitesur-theme/install.sh -d /usr/share/themes -t all -s all -c Dark > /dev/null 2>&1 || true
+    rm -rf /tmp/whitesur-theme
+fi
+
+# 5. Konfigurasi VNC Password & xstartup
+mkdir -p "$HOME_DIR/.vnc"
+echo "$VNC_PASS" | vncpasswd -f > "$HOME_DIR/.vnc/passwd"
+chmod 600 "$HOME_DIR/.vnc/passwd"
+
+cat << 'XSTARTUP' > "$HOME_DIR/.vnc/xstartup"
+#!/bin/bash
+unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
+export XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP=XFCE
+
+# Terapkan tema macOS & tombol jendela di kiri atas
+xfconf-query -c xsettings -p /Net/ThemeName -s "WhiteSur-Dark" --create -t string 2>/dev/null || true
+xfconf-query -c xsettings -p /Net/IconThemeName -s "WhiteSur-dark" --create -t string 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/theme -s "WhiteSur-Dark" --create -t string 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/button_layout -s "CHM|" --create -t string 2>/dev/null || true
+xfconf-query -c xsettings -p /Gtk/CursorThemeName -s "WhiteSur-cursors" --create -t string 2>/dev/null || true
+
+# Jalankan macOS Plank Dock
+plank &
+
+exec dbus-launch --exit-with-session startxfce4
+XSTARTUP
+chmod +x "$HOME_DIR/.vnc/xstartup"
+
+# Shortcut Desktop
+mkdir -p "$HOME_DIR/Desktop"
+cp /usr/share/applications/google-chrome.desktop "$HOME_DIR/Desktop/" 2>/dev/null || true
+cp /usr/share/applications/xfce4-terminal.desktop "$HOME_DIR/Desktop/" 2>/dev/null || true
+chmod +x "$HOME_DIR/Desktop/"*.desktop 2>/dev/null || true
+
+# Hubungkan Google Drive jika tersedia di Colab
 if [ -d "/content/drive/MyDrive" ]; then
-    echo "Folder Google Drive terdeteksi, menghubungkan ke /config/GoogleDrive..."
-    VOLUME_FLAGS="-v /content/drive/MyDrive:/config/GoogleDrive -v /content:/content"
-elif [ -d "/content" ]; then
-    VOLUME_FLAGS="-v /content:/content"
+    ln -sf "/content/drive/MyDrive" "$HOME_DIR/Desktop/Google Drive"
+elif [ -d "/content/drive" ]; then
+    ln -sf "/content/drive" "$HOME_DIR/Desktop/Google Drive"
 fi
 
-# 3. Jalankan Container (Docker / udocker fallback untuk Colab)
-pkill -f "cloudflared.*3000" 2>/dev/null || true
-
-if command -v docker &>/dev/null && docker info &>/dev/null; then
-    echo "Menggunakan Docker Engine..."
-    docker rm -f macoshack 2>/dev/null || true
-    docker run -d --name macoshack --net=host $VOLUME_FLAGS tuwiliyt/macoshack:latest
-else
-    echo "Menyiapkan udocker (engine container user-space untuk Google Colab)..."
-    pip install -q udocker
-    udocker --allow-root install &>/dev/null || true
-    
-    echo "Mengunduh image tuwiliyt/macoshack:latest (bisa butuh 1-2 menit)..."
-    udocker --allow-root pull tuwiliyt/macoshack:latest
-    
-    echo "Menjalankan container tuwiliyt/macoshack..."
-    udocker --allow-root rm -f macoshack 2>/dev/null || true
-    udocker --allow-root create --name=macoshack tuwiliyt/macoshack:latest
-    
-    mkdir -p /var/log/remote-desktop
-    nohup udocker --allow-root run $VOLUME_FLAGS macoshack > /var/log/remote-desktop/macoshack.log 2>&1 &
+if [ -d "/content" ]; then
+    ln -sf "/content" "$HOME_DIR/Desktop/Colab Workspace"
 fi
 
-# 4. Tunggu port 3000 aktif
-echo "Menunggu web interface aktif pada port 3000..."
-for i in {1..50}; do
-    if netstat -tlpn 2>/dev/null | grep -E ':3000\b' > /dev/null; then
-        echo "Layanan aktif di port 3000!"
-        break
-    fi
-    sleep 2
-done
+# noVNC index
+ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
-# 5. Hubungkan dengan Cloudflare Tunnel
-echo "Membuka tunnel publik Cloudflare..."
+# 6. Jalankan Service Desktop & Cloudflare Tunnel
+echo "Menyalakan TigerVNC & noVNC..."
+pkill -f "cloudflared.*tunnel" 2>/dev/null || true
+pkill -f "websockify.*6080" 2>/dev/null || true
+vncserver -kill :1 2>/dev/null || true
+sleep 1
+
+vncserver :1 -geometry 1280x720 -depth 24
+websockify --web=/usr/share/novnc 6080 localhost:5901 -D
+
 mkdir -p /var/log/remote-desktop
-nohup cloudflared tunnel --url http://127.0.0.1:3000 > /var/log/remote-desktop/cloudflared-macos.log 2>&1 &
+nohup cloudflared tunnel --url http://127.0.0.1:6080 > /var/log/remote-desktop/cloudflared-macos.log 2>&1 &
 
+# 7. Dapatkan Link Akses
+echo "Menghubungkan ke Cloudflare Edge..."
 URL=""
 for i in {1..35}; do
     URL=$(grep -o 'https://[-a-zA-Z0-9@:%._\+~#=]*\.trycloudflare\.com' /var/log/remote-desktop/cloudflared-macos.log 2>/dev/null | tail -n 1 || true)
@@ -74,15 +126,16 @@ echo ""
 echo "=================================================================="
 echo "          🎉 MACOSHACK DESKTOP BERHASIL AKTIF! 🎉"
 echo "=================================================================="
-if [ -n "$URL" ]; then
-    echo " Link Akses Browser : $URL"
+[ -n "$URL" ] && echo " Link Akses Browser : $URL/vnc.html?autoconnect=true&resize=scale"
+echo " Password VNC       : $VNC_PASS"
+echo " User               : $USER_NAME"
+if command -v nvidia-smi &>/dev/null; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "Terdeteksi")
+    echo " Akselerasi GPU     : Aktif ($GPU_NAME)"
 else
-    echo " Catatan: Tunnel sedang dibuat, cek link via:"
-    echo " cat /var/log/remote-desktop/cloudflared-macos.log"
+    echo " Akselerasi GPU     : Mode CPU"
 fi
-echo " Image              : tuwiliyt/macoshack:latest"
-echo " Port Internal      : 3000 (HTTP Web GUI)"
 if [ -d "/content/drive/MyDrive" ]; then
-    echo " Google Drive       : Terhubung (/config/GoogleDrive)"
+    echo " Google Drive       : Terhubung (/content/drive/MyDrive)"
 fi
 echo "=================================================================="
